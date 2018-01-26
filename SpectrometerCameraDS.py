@@ -102,10 +102,13 @@ class SpectrometerCameraDS(Device, CameraDeviceController):
         self.wavelengthvector_data = self.central_wavelength + np.arange(-self.roi[2] / 2,
                                                                          self.roi[2] / 2) * self.dispersion
 
-        self.write_attribute("imageoffsetx", self.roi[0])
-        self.write_attribute("imageoffsety", self.roi[1])
-        self.write_attribute("imagewidth", self.roi[2])
-        self.write_attribute("imageheight", self.roi[3])
+        cmd0 = self.exec_command("stop")
+        cmd_d = self.delay_command(1.0, after_cmd=cmd0)
+        cmd1 = self.write_attribute("imageoffsetx", self.roi[0], after_cmd=cmd_d)
+        cmd2 = self.write_attribute("imageoffsety", self.roi[1], after_cmd=cmd_d)
+        cmd3 = self.write_attribute("imagewidth", self.roi[2], after_cmd=cmd_d)
+        cmd4 = self.write_attribute("imageheight", self.roi[3], after_cmd=cmd_d)
+        self.exec_command("start", after_cmd=[cmd1, cmd2, cmd3, cmd4])
 
     def get_spectrum(self):
         attr = self.get_attribute("image")
