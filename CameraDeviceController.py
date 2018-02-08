@@ -71,6 +71,8 @@ class Attribute(object):
     def write(self, data):
         try:
             self.device.write_attribute(self.name, data, wait=False)
+        except:
+            pass
 
     def add_subscriber(self, subscriber):
         root.info("Adding subscriber {0}".format(str(subscriber)))

@@ -71,6 +71,8 @@ class CameraDeviceController(object):
         self.watchdog_timer = None
         self.watchdog_timeout = 3.0
         self.state = pt.DevState.UNKNOWN
+        self.state_cb_list = []
+        self.init_setup_flag = False
 
         self.schedule_list = list()
         self.schedule_timer = None
@@ -85,7 +87,7 @@ class CameraDeviceController(object):
         self.disconnect()
         root.info("Connecting to {0}".format(self.device_name))
         self.device = None
-        self.state = pt.DevState.UNKNOWN
+        self.set_state(pt.DevState.UNKNOWN)
         try:
             dev_future = ptf.DeviceProxy(self.device_name, wait=False)
         except pt.DevFailed as e:
@@ -97,7 +99,7 @@ class CameraDeviceController(object):
         root.info("Connected callback")
         if dev_future.cancelled() is True:
             root.error("Device future cancelled")
-            self.state = pt.DevState.UNKNOWN
+            self.set_state(pt.DevState.UNKNOWN)
             self.device = None
             return
         try:
@@ -105,22 +107,24 @@ class CameraDeviceController(object):
         except pt.DevFailed as e:
             root.error("Device future devfailed {0}".format(str(e)))
             if e[0].reason == "API_DeviceNotExported":
-                self.state = pt.DevState.UNKNOWN
+                self.set_state(pt.DevState.UNKNOWN)
                 self.device = None
+                return
             else:
                 raise
         self.device = dev
-        self.state = pt.DevState.ON
+        # self.set_state(pt.DevState.ON)
+        # self.setup_attributes()
+        self._read_attribute("state")
         self.reset_watchdog()
-        self.setup_attributes()
-        self.process_schedule()
+        # self.process_schedule()
 
     def setup_attributes(self):
         root.info("Setting up periodic read attributes dict")
+        self.add_polled_attribute("state", 0.5)
         self.add_polled_attribute("gain", 1.0)
         self.add_polled_attribute("exposuretime", 1.0)
         self.add_polled_attribute("image", 0.5)
-        self.add_polled_attribute("state", 0.5)
 
     def _read_attribute(self, attr_name):
         root.info("Sending read attribute {0} to device".format(attr_name))
@@ -144,6 +148,8 @@ class CameraDeviceController(object):
                 attr_name = attr.name.lower()
             except pt.DevFailed as e:
                 root.error("Attribute future devfailed {0}".format(str(e)))
+                root.error("origin {0}".format(e[0].origin))
+                root.error("reason {0}".format(e[0].reason))
                 if e[0].reason == "API_DeviceNotExported":
                     self.state = pt.DevState.UNKNOWN
                     self.device = None
@@ -152,8 +158,16 @@ class CameraDeviceController(object):
                     self.state = pt.DevState.UNKNOWN
                     self.device = None
                     return
+                elif e[0].reason == "API_CantConnectToDevice":
+                    self.state = pt.DevState.UNKNOWN
+                    self.device = None
+                    return
                 else:
+                    root.error("Re-throw")
                     pt.Except.re_throw_exception(e, "", "", "")
+            except ValueError as e:
+                root.error("Value error for future {0}".format(e))
+                return
             if attr_name in self.attributes:
                 t = self.attributes[attr_name][1]
                 self.attributes[attr_name] = (attr, self.attributes[attr_name][1])
@@ -166,8 +180,15 @@ class CameraDeviceController(object):
                     self.schedule_timer.start()
             else:
                 self.attributes[attr_name] = (attr, None)
-            if attr_name == "state":
-                self.state = attr.value
+        if attr_name == "state":
+            if self.state != attr.value:
+                if self.state == pt.DevState.UNKNOWN:
+                    if self.init_setup_flag is True:
+                        root.debug("Moving from UNKNOWN to {0}. Setting up read attributes.".format(attr.value))
+                        self.init_setup_flag = False
+                        self.process_after_result_flag = True
+                        self.setup_attributes()
+                self.set_state(attr.value)
         self.reset_watchdog()
         if self.process_after_result_flag is True:
             self.process_schedule()
@@ -192,6 +213,8 @@ class CameraDeviceController(object):
             self.read_attribute(attr_future.name)
         except pt.DevFailed as e:
             root.error("Attribute future devfailed {0}".format(str(e)))
+            root.error("origin {0}".format(e[0].origin))
+            root.error("reason {0}".format(e[0].reason))
             if e[0].reason == "API_DeviceNotExported":
                 self.state = pt.DevState.UNKNOWN
                 self.device = None
@@ -200,7 +223,12 @@ class CameraDeviceController(object):
                 self.state = pt.DevState.UNKNOWN
                 self.device = None
                 return
+            elif e[0].reason == "API_CantConnectToDevice":
+                self.state = pt.DevState.UNKNOWN
+                self.device = None
+                return
             else:
+                root.error("Re-throw")
                 pt.Except.re_throw_exception(e, "", "", "")
         except AttributeError:
             pass
@@ -226,6 +254,9 @@ class CameraDeviceController(object):
             root.debug("Command result received: {0}".format(result))
         except pt.DevFailed as e:
             root.error("Command future devfailed {0}".format(str(e)))
+            root.error("Attribute future devfailed {0}".format(str(e)))
+            root.error("origin {0}".format(e[0].origin))
+            root.error("reason {0}".format(e[0].reason))
             if e[0].reason == "API_DeviceNotExported":
                 self.state = pt.DevState.UNKNOWN
                 self.device = None
@@ -234,7 +265,12 @@ class CameraDeviceController(object):
                 self.state = pt.DevState.UNKNOWN
                 self.device = None
                 return
+            elif e[0].reason == "API_CantConnectToDevice":
+                self.state = pt.DevState.UNKNOWN
+                self.device = None
+                return
             else:
+                root.error("Re-throw")
                 pt.Except.re_throw_exception(e, "", "", "")
         if self.process_after_result_flag is True:
             self.process_schedule()
@@ -306,9 +342,11 @@ class CameraDeviceController(object):
                             delay_timer.start()
 
                 if len(self.schedule_list) > 0:
-                    root.debug("New schedule timer set: {0}".format(next_time))
+                    root.debug("New schedule timer set: {0} s".format(next_time - time.time()))
                     self.schedule_timer = threading.Timer(next_time - time.time(), self.process_schedule)
                     self.schedule_timer.start()
+            else:
+                root.debug("State UNKNOWN, don't process schedule")
         self.process_queue.get()
 
     def reset_watchdog(self):
@@ -323,13 +361,18 @@ class CameraDeviceController(object):
             self.watchdog_timer.cancel()
 
     def watchdog_handler(self):
-        root.debug("Watchdog timed out. ")
-        return
-        if self.state != pt.DevState.INIT:
-            self.state = pt.DevState.INIT
+        root.debug("Watchdog timed out.  ")
+        root.debug("Current state: {0}".format(self.state))
+        if self.state not in [pt.DevState.INIT, pt.DevState.UNKNOWN]:
+            root.debug("Testing to issue INIT command to device")
+            root.debug("Lock status: {0}".format(self.lock.locked()))
             self.exec_command("init")
             self.read_attribute("state")
+            self.set_state(pt.DevState.INIT)
+            self.watchdog_timer = None
+            self.reset_watchdog()
         else:
+            root.debug("Testing reconnect to device")
             self.connect()
 
     def get_attribute(self, attr_name):
@@ -337,6 +380,8 @@ class CameraDeviceController(object):
             with self.lock:
                 attr = self.attributes[attr_name][0]
             return attr
+        else:
+            return None
 
     def read_attribute(self, attr_name, after_cmd=None):
         root.info("Read attribute {0}".format(attr_name))
@@ -384,6 +429,7 @@ class CameraDeviceController(object):
     def exec_command(self, cmd_name, value=None, after_cmd=None):
         root.info("Execute command {0} with {1}".format(cmd_name, value))
         sch_cmd = ScheduleCommand(cmd_name, -1, "command", value, cmd_not_pending_list=after_cmd)
+        root.debug("Lock status: {0}".format(self.lock.locked()))
         with self.lock:
             if cmd_name not in self.schedule_list:
                 # The command was not in the schedule_list, so issue a new command
@@ -403,7 +449,9 @@ class CameraDeviceController(object):
                     self.schedule_list[ind] = sch_cmd
                 else:
                     bisect.insort(self.schedule_list, sch_cmd)
+        root.debug("...done")
         self.process_schedule()
+        root.debug("...return")
         return sch_cmd
 
     def delay_command(self, value, after_cmd=None):
@@ -433,6 +481,17 @@ class CameraDeviceController(object):
     def get_state(self):
         return self.state
 
+    def set_state(self, new_state):
+        root.debug("Setting new state {0}".format(new_state))
+        self.state = new_state
+        for cb in self.state_cb_list:
+            root.debug("Calling state callback {0}".format(cb))
+            cb(new_state)
+
+    def add_state_callback(self, cb):
+        root.debug("Adding state callback {0}".format(cb))
+        self.state_cb_list.append(cb)
+
     def disconnect(self):
         try:
             self.watchdog_timer.cancel()
@@ -446,6 +505,7 @@ class CameraDeviceController(object):
                 pass
         self.device = None
         self.state = pt.DevState.UNKNOWN
+        self.init_setup_flag = True
 
 
 if __name__ == "__main__":

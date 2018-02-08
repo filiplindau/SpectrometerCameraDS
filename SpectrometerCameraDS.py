@@ -10,11 +10,11 @@ import PyTango as pt
 from PyTango.server import Device, DeviceMeta
 from PyTango.server import attribute
 from PyTango.server import device_property
-from CameraDeviceController_futures import CameraDeviceController
+from CameraDeviceController_2 import CameraDeviceController
 import numpy as np
 
 
-class SpectrometerCameraDS(Device, CameraDeviceController):
+class SpectrometerCameraDS(Device):
     __metaclass__ = DeviceMeta
 
     exposuretime = attribute(label='ExposureTime',
@@ -87,33 +87,58 @@ class SpectrometerCameraDS(Device, CameraDeviceController):
                           default_value=[0, 0, 100, 100])
 
     def __init__(self, klass, name):
-        Device.__init__(self, klass, name)
         self.wavelengthvector_data = np.array([])
+        self.dev_controller = None
+        Device.__init__(self, klass, name)
 
     def init_device(self):
         self.debug_stream("In init_device:")
         Device.init_device(self)
+        self.set_state(pt.DevState.UNKNOWN)
         self.debug_stream("Init camera controller {0}".format(self.camera_name))
-        CameraDeviceController.__init__(self, self.camera_name)
-        self.setup_camera()
+        try:
+            self.dev_controller = CameraDeviceController(self.camera_name)
+            self.setup_camera()
+        except Exception as e:
+            self.error_stream("Error creating camera controller: {0}".format(e))
+            return
+        self.set_state(pt.DevState.INIT)
+        self.debug_stream("Type dev_controller: {0}".format(type(self.dev_controller)))
+        attrs = self.get_device_attr()
+        attr_nbr = attrs.get_attr_nb()
+        self.info_stream("Found {0} attributes.".format(attr_nbr))
+        for k in range(attr_nbr):
+            attr = attrs.get_attr_by_ind(k)
+            self.info_stream("Attribute {0}: write index {1}".format(attr.get_name(), attr.get_assoc_ind()))
+            if attr.get_assoc_name() != 'None':
+                w_attr = attrs.get_w_attr_by_ind(attr.get_assoc_ind())
+                self.info_stream("Write name {0}: {1}".format(w_attr.get_name(), w_attr.get_write_value()))
+
+        self.debug_stream("init_device finished")
+        # self.set_state(pt.DevState.ON)
+        self.dev_controller.add_state_callback(self.change_state)
 
     def setup_camera(self):
         self.info_stream("Entering setup_camera")
-        self.wavelengthvector_data = self.central_wavelength + np.arange(-self.roi[2] / 2,
-                                                                         self.roi[2] / 2) * self.dispersion
+        self.wavelengthvector_data = (self.central_wavelength + np.arange(-self.roi[2] / 2,
+                                                                          self.roi[2] / 2) * self.dispersion) * 1e-9
 
-        cmd0 = self.exec_command("stop")
-        cmd_d = self.delay_command(1.0, after_cmd=cmd0)
-        cmd1 = self.write_attribute("imageoffsetx", self.roi[0], after_cmd=cmd_d)
-        cmd2 = self.write_attribute("imageoffsety", self.roi[1], after_cmd=cmd_d)
-        cmd3 = self.write_attribute("imagewidth", self.roi[2], after_cmd=cmd_d)
-        cmd4 = self.write_attribute("imageheight", self.roi[3], after_cmd=cmd_d)
-        self.exec_command("start", after_cmd=[cmd1, cmd2, cmd3, cmd4])
+        cmd0 = self.dev_controller.exec_command("stop")
+        cmd_d = self.dev_controller.delay_command(1.0, after_cmd=cmd0)
+        cmd1 = self.dev_controller.write_attribute("imageoffsetx", self.roi[0], after_cmd=cmd_d)
+        cmd2 = self.dev_controller.write_attribute("imageoffsety", self.roi[1], after_cmd=cmd_d)
+        cmd3 = self.dev_controller.write_attribute("imagewidth", self.roi[2], after_cmd=cmd_d)
+        cmd4 = self.dev_controller.write_attribute("imageheight", self.roi[3], after_cmd=cmd_d)
+        self.dev_controller.exec_command("start", after_cmd=[cmd1, cmd2, cmd3, cmd4])
+
+    def change_state(self, new_state):
+        self.debug_stream("Change state from {0} to {1}".format(self.get_state(), new_state))
+        self.set_state(new_state)
 
     def get_spectrum(self):
-        attr = self.get_attribute("image")
+        attr = self.dev_controller.get_attribute("image")
         try:
-            spectrum = attr.value.sum(1)
+            spectrum = attr.value.sum(0)
         except AttributeError:
             spectrum = []
         return spectrum, attr.time.totime(), attr.quality
@@ -123,20 +148,21 @@ class SpectrometerCameraDS(Device, CameraDeviceController):
         return self.wavelengthvector_data, time.time(), pt.AttrQuality.ATTR_VALID
 
     def get_exposuretime(self):
-        attr = self.get_attribute("exposuretime")
+        attr = self.dev_controller.get_attribute("exposuretime")
         return attr.value, attr.time.totime(), attr.quality
 
     def set_exposuretime(self, new_exposuretime):
         self.debug_stream("In set_exposuretime: New value {0}".format(new_exposuretime))
-        self.write_attribute("exposuretime", new_exposuretime)
+        self.debug_stream("Type dev_controller: {0}".format(type(self.dev_controller)))
+        self.dev_controller.write_attribute("exposuretime", new_exposuretime)
 
     def get_gain(self):
-        attr = self.get_attribute("gain")
+        attr = self.dev_controller.get_attribute("gain")
         return attr.value, attr.time.totime(), attr.quality
 
     def set_gain(self, new_gain):
         self.debug_stream("In set_gain: New value {0}".format(new_gain))
-        self.write_attribute("gain", new_gain)
+        self.dev_controller.write_attribute("gain", new_gain)
 
 
 if __name__ == "__main__":
