@@ -22,7 +22,7 @@ f = logging.Formatter("%(asctime)s - %(module)s.   %(funcName)s - %(levelname)s 
 fh = logging.StreamHandler()
 fh.setFormatter(f)
 root.addHandler(fh)
-root.setLevel(logging.CRITICAL)
+root.setLevel(logging.ERROR)
 
 
 class Condition(object):
@@ -104,7 +104,7 @@ class Condition(object):
 
 
 class DeviceCommand(object):
-    def __init__(self, name, operation, device, data=None, recurrent=False, period=1.0):
+    def __init__(self, name, operation, device, data=None, recurrent=False, period=1.0, timeout=2.0):
         self.name = name
         self.operation = operation
         self.device = device
@@ -112,52 +112,81 @@ class DeviceCommand(object):
 
         self.done = False
         self.pending = False
+        self.timed_out = False
+        self.status_msg = ""
+        self.state = pt.DevState.ON
 
         self.subscriber_list = list()
+        self.subscriber_lock = threading.Lock()
         self.condition_dict = dict()
         self.post_action_list = list()
 
         self.recurrent = recurrent
         self.period = period
-        self.timer = None
+        self.delay_timer = None
         self.start_time = time.time()
         self.attr_result = None
+        self._timeout = timeout
+        self.timeout_timer = None
 
     def add_subscriber(self, subscriber):
-        if subscriber not in self.subscriber_list:
-            self.subscriber_list.append(subscriber)
+        with self.subscriber_lock:
+            if subscriber not in self.subscriber_list:
+                self.subscriber_list.append(subscriber)
 
     def remove_subscriber(self, subscriber):
-        if subscriber in self.subscriber_list:
-            self.subscriber_list.remove(subscriber)
+        with self.subscriber_lock:
+            if subscriber in self.subscriber_list:
+                self.subscriber_list.remove(subscriber)
 
     def notify_subscribers(self):
-        for subscriber in self.subscriber_list:
-            try:
-                subscriber(self)
-            except NameError:
-                self.remove_subscriber(subscriber)
-            except Exception as e:
-                root.error("Error notifying subsciber {0} returned {1}".format(subscriber, str(e)))
+        remove_list = list()
+        with self.subscriber_lock:
+            for subscriber in self.subscriber_list:
+                try:
+                    root.debug("Calling subscriber {0}".format(subscriber))
+                    subscriber(self)
+                except NameError:
+                    remove_list.append(subscriber)
+                except Exception as e:
+                    root.error("Error notifying subscriber {0} returned {1}".format(subscriber, str(e)))
+        for rem_sub in remove_list:
+            self.remove_subscriber(rem_sub)
 
     def start(self):
         root.debug("Starting command \"{0}\"".format(self.name))
         try:
-            self.timer.cancel()
+            self.delay_timer.cancel()
+        except AttributeError:
+            pass
+        try:
+            self.timeout_timer.cancel()
         except AttributeError:
             pass
         self.pending = True
         self.done = False
+        self.timed_out = False
         self.start_time = time.time()
+        if self._timeout is not None:
+            self.timeout_timer = threading.Timer(self._timeout, self._timeout_cb)
+            self.timeout_timer.start()
+        self.status_msg = "Command started"
+        self.state = pt.DevState.ON
         self.check_condition()
 
     def cancel(self):
         root.debug("Cancelling command \"{0}\"".format(self.name))
         self.pending = False
         try:
-            self.timer.cancel()
+            self.delay_timer.cancel()
         except AttributeError:
             pass
+        try:
+            self.timeout_timer.cancel()
+        except AttributeError:
+            pass
+        self.clear_conditions()
+        self.status_msg = "Command cancelled"
 
     def check_condition(self, cond_obj=None):
         root.debug("Check conditions for \"{0}\"".format(self.name))
@@ -224,19 +253,14 @@ class DeviceCommand(object):
     def exec_post_actions(self):
         root.debug("Executing post actions for {0}".format(self.name))
         self.pending = False
-        self.done = True
+        if self.state == pt.DevState.ON:
+            self.done = True
+            self.status_msg = "Command finished"
+        else:
+            self.done = False
         for action in self.post_action_list:
             action.execute()
-        for subscriber in self.subscriber_list:
-            root.debug("Calling subscriber {0}".format(subscriber))
-            subscriber(self)
-        # if self.recurrent is True:
-        #     new_time = self.scheduled_time + self.period
-        #     self.scheduled_time = new_time
-        #     self.pending = True
-        #     t = np.maximum(0, new_time - time.time())
-        #     self.timer = threading.Timer(t, self.start)
-        #     self.timer.start()
+        self.notify_subscribers()
 
     def _read_attribute(self):
         root.info("Sending read attribute \"{0}\" to device".format(self.name))
@@ -245,6 +269,7 @@ class DeviceCommand(object):
                 attr_future = self.device.read_attribute(self.name, wait=False)
             except pt.DevFailed as e:
                 root.error("read_attribute returned error {0}".format(str(e)))
+                self.status_msg = e[0].desc
                 return False
             attr_future.add_done_callback(self._attribute_cb)
 
@@ -254,6 +279,7 @@ class DeviceCommand(object):
                 attr_future = self.device.write_attribute(self.name, self.data, wait=False)
             except pt.DevFailed as e:
                 root.error("write_attribute returned error {0}".format(str(e)))
+                self.status_msg = e[0].desc
                 return False
             attr_future.add_done_callback(self._attribute_cb)
 
@@ -263,18 +289,19 @@ class DeviceCommand(object):
                 cmd_future = self.device.command_inout(self.name, self.data, wait=False)
             except pt.DevFailed as e:
                 root.error("exec_command returned error {0}".format(str(e)))
+                self.status_msg = e[0].desc
                 return False
             cmd_future.add_done_callback(self._attribute_cb)
 
     def _delay_operation(self):
         root.debug("Delay timer {0} s started".format(self.data))
         try:
-            if self.timer.is_alive() is True:
-                self.timer.cancel()
+            if self.delay_timer.is_alive() is True:
+                self.delay_timer.cancel()
         except AttributeError:
             pass
-        self.timer = threading.Timer(self.data, self._attribute_cb)
-        self.timer.start()
+        self.delay_timer = threading.Timer(self.data, self._attribute_cb)
+        self.delay_timer.start()
 
     def _attribute_cb(self, attr_future=None):
         root.info("\"{0}\" _attribute callback".format(self.name))
@@ -288,30 +315,59 @@ class DeviceCommand(object):
                 root.error("Attribute future devfailed {0}".format(str(e)))
                 root.error("origin {0}".format(e[0].origin))
                 root.error("reason {0}".format(e[0].reason))
+                attr = None
                 if e[0].reason == "API_DeviceNotExported":
                     self.state = pt.DevState.UNKNOWN
-                    self.device = None
-                    return
+                    # self.device = None
+                    self.status_msg = e[0].desc
+                    # return
                 elif e[0].reason == "API_DeviceTimedOut":
                     self.state = pt.DevState.UNKNOWN
-                    self.device = None
-                    return
+                    # self.device = None
+                    self.status_msg = e[0].desc
+                    # return
                 elif e[0].reason == "API_CantConnectToDevice":
                     self.state = pt.DevState.UNKNOWN
-                    self.device = None
-                    return
+                    # self.device = None
+                    self.status_msg = e[0].desc
+                    # return
+                elif e[0].reason == "DB_DeviceNotDefined":
+                    self.state = pt.DevState.UNKNOWN
+                    # self.device = None
+                    self.status_msg = e[0].desc
+                    # return
+                elif e[0].reason == "API_AttrNotAllowed":
+                    self.state = pt.DevState.ALARM
+                    # self.device = None
+                    self.status_msg = e[0].desc
+                    # return
                 else:
                     root.error("Re-throw")
                     pt.Except.re_throw_exception(e, "", "", "")
             except ValueError as e:
                 root.error("Value error for future {0}".format(e))
+                self.status_msg = "Value error for device concurrent callback"
                 return
         else:
             attr = None
         self.attr_result = attr     # Save result
         if attr is not None:
             root.debug("Attribute \"{0}\" result received".format(attr.name))
+            self.status_msg = "Attribute \"{0}\" result received".format(attr.name)
         self.exec_post_actions()
+
+    def _timeout_cb(self):
+        root.debug("------------------------------------------------------------")
+        root.debug("Timeout for command \"{0}\"".format(self.name))
+        root.debug("------------------------------------------------------------")
+        self.cancel()
+        self.pending = False
+        self.done = False
+        self.timed_out = True
+        self.timeout_timer = None
+        self.status_msg = "Command timeout"
+        self.state = pt.DevState.ALARM
+        self.notify_subscribers()
 
 
 class AttributeWrapper(object):
@@ -323,24 +379,31 @@ class AttributeWrapper(object):
             self.attr_result = attr
         self.done = True
 
+        self.subcriber_lock = threading.Lock()
         self.subscriber_list = list()
 
     def add_subscriber(self, subscriber):
-        if subscriber not in self.subscriber_list:
-            self.subscriber_list.append(subscriber)
+        with self.subcriber_lock:
+            if subscriber not in self.subscriber_list:
+                self.subscriber_list.append(subscriber)
 
     def remove_subscriber(self, subscriber):
-        if subscriber in self.subscriber_list:
-            self.subscriber_list.remove(subscriber)
+        with self.subcriber_lock:
+            if subscriber in self.subscriber_list:
+                self.subscriber_list.remove(subscriber)
 
     def notify_subscribers(self):
-        for subscriber in self.subscriber_list:
-            try:
-                subscriber(self)
-            except NameError:
-                self.remove_subscriber(subscriber)
-            except Exception as e:
-                root.error("Error notifying subscriber {0} returned {1}".format(subscriber, str(e)))
+        remove_list = list()
+        with self.subcriber_lock:
+            for subscriber in self.subscriber_list:
+                try:
+                    subscriber(self)
+                except NameError:
+                    remove_list.append(subscriber)
+                except Exception as e:
+                    root.error("Error notifying subscriber {0} returned {1}".format(subscriber, str(e)))
+        for rem_sub in remove_list:
+            self.remove_subscriber(rem_sub)
 
     def get_attribute(self):
         return self.attr_result

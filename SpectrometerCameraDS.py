@@ -27,8 +27,8 @@ class SpectrometerCameraDS(Device):
                              fget="get_exposuretime",
                              fset="set_exposuretime",
                              doc="Camera exposure time in us",
-                             memorized=True,
-                             hw_memorized=True)
+                             memorized=True,)
+                             # hw_memorized=True)
 
     gain = attribute(label='Gain',
                      dtype=float,
@@ -40,8 +40,8 @@ class SpectrometerCameraDS(Device):
                      fget="get_gain",
                      fset="set_gain",
                      doc="Camera gain in dB",
-                     memorized=True,
-                     hw_memorized=True)
+                     memorized=True,)
+                     # hw_memorized=True)
 
     wavelengthvector = attribute(label='WavelengthVector',
                                  dtype=[np.double],
@@ -89,30 +89,32 @@ class SpectrometerCameraDS(Device):
     def __init__(self, klass, name):
         self.wavelengthvector_data = np.array([])
         self.dev_controller = None
+        self.db = None
         Device.__init__(self, klass, name)
 
     def init_device(self):
         self.debug_stream("In init_device:")
         Device.init_device(self)
+        self.db = pt.Database()
         self.set_state(pt.DevState.UNKNOWN)
         self.debug_stream("Init camera controller {0}".format(self.camera_name))
+        params = dict()
+        params["imageoffsetx"] = self.roi[0]
+        params["imageoffsety"] = self.roi[1]
+        params["imagewidth"] = self.roi[2]
+        params["imageheight"] = self.roi[3]
+        params["triggermode"] = "Off"
         try:
-            self.dev_controller = CameraDeviceController(self.camera_name)
+            if self.dev_controller is not None:
+                self.dev_controller.stop_thread()
+        except Exception as e:
+            self.error_info("Error stopping camera controller: {0}".format(e))
+        try:
+            self.dev_controller = CameraDeviceController(self.camera_name, params)
             self.setup_camera()
         except Exception as e:
             self.error_stream("Error creating camera controller: {0}".format(e))
             return
-        self.set_state(pt.DevState.INIT)
-        self.debug_stream("Type dev_controller: {0}".format(type(self.dev_controller)))
-        attrs = self.get_device_attr()
-        attr_nbr = attrs.get_attr_nb()
-        self.info_stream("Found {0} attributes.".format(attr_nbr))
-        for k in range(attr_nbr):
-            attr = attrs.get_attr_by_ind(k)
-            self.info_stream("Attribute {0}: write index {1}".format(attr.get_name(), attr.get_assoc_ind()))
-            if attr.get_assoc_name() != 'None':
-                w_attr = attrs.get_w_attr_by_ind(attr.get_assoc_ind())
-                self.info_stream("Write name {0}: {1}".format(w_attr.get_name(), w_attr.get_write_value()))
 
         self.debug_stream("init_device finished")
         # self.set_state(pt.DevState.ON)
@@ -123,17 +125,37 @@ class SpectrometerCameraDS(Device):
         self.wavelengthvector_data = (self.central_wavelength + np.arange(-self.roi[2] / 2,
                                                                           self.roi[2] / 2) * self.dispersion) * 1e-9
 
-        cmd0 = self.dev_controller.exec_command("stop")
-        cmd_d = self.dev_controller.delay_command(1.0, after_cmd=cmd0)
-        cmd1 = self.dev_controller.write_attribute("imageoffsetx", self.roi[0], after_cmd=cmd_d)
-        cmd2 = self.dev_controller.write_attribute("imageoffsety", self.roi[1], after_cmd=cmd_d)
-        cmd3 = self.dev_controller.write_attribute("imagewidth", self.roi[2], after_cmd=cmd_d)
-        cmd4 = self.dev_controller.write_attribute("imageheight", self.roi[3], after_cmd=cmd_d)
-        self.dev_controller.exec_command("start", after_cmd=[cmd1, cmd2, cmd3, cmd4])
+        # cmd0 = self.dev_controller.exec_command("stop")
+        # cmd_d = self.dev_controller.delay_command(1.0, after_cmd=cmd0)
+        # cmd1 = self.dev_controller.write_attribute("imageoffsetx", self.roi[0], after_cmd=cmd_d)
+        # cmd2 = self.dev_controller.write_attribute("imageoffsety", self.roi[1], after_cmd=cmd_d)
+        # cmd3 = self.dev_controller.write_attribute("imagewidth", self.roi[2], after_cmd=cmd_d)
+        # cmd4 = self.dev_controller.write_attribute("imageheight", self.roi[3], after_cmd=cmd_d)
+        # self.dev_controller.exec_command("start", after_cmd=[cmd1, cmd2, cmd3, cmd4])
 
-    def change_state(self, new_state):
+    def change_state(self, new_state, new_status=None):
         self.debug_stream("Change state from {0} to {1}".format(self.get_state(), new_state))
+        if self.get_state() is pt.DevState.INIT and new_state is not pt.DevState.UNKNOWN:
+            self.debug_stream("Set memorized attributes")
+            data = self.db.get_device_attribute_property(self.get_name(), "gain")
+            self.debug_stream("Database returned data for \"gain\": {0}".format(data["gain"]))
+            try:
+                new_value = float(data["gain"]["__value"][0])
+                self.debug_stream("{0}".format(new_value))
+                self.dev_controller.write_attribute("gain", new_value)
+            except (KeyError, TypeError, IndexError, ValueError):
+                pass
+            data = self.db.get_device_attribute_property(self.get_name(), "exposuretime")
+            self.debug_stream("Database returned data for \"exposuretime\": {0}".format(data["exposuretime"]))
+            try:
+                new_value = float(data["exposuretime"]["__value"][0])
+                self.dev_controller.write_attribute("exposuretime", new_value)
+            except (KeyError, TypeError, IndexError, ValueError):
+                pass
         self.set_state(new_state)
+        if new_status is not None:
+            self.debug_stream("Setting status {0}".format(new_status))
+            self.set_status(new_status)
 
     def get_spectrum(self):
         attr = self.dev_controller.get_attribute("image")
