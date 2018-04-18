@@ -21,7 +21,7 @@ f = logging.Formatter("%(asctime)s - %(module)s.   %(funcName)s - %(levelname)s 
 fh = logging.StreamHandler()
 fh.setFormatter(f)
 root.addHandler(fh)
-root.setLevel(logging.DEBUG)
+root.setLevel(logging.CRITICAL)
 
 
 class CameraDeviceController(object):
@@ -296,7 +296,7 @@ class CameraDeviceController(object):
 
         :return:
         """
-        root.debug("Watchdog timed out. ")
+        root.critical("Watchdog timed out. ")
         self.set_state(pt.DevState.UNKNOWN)
 
     def get_attribute(self, attr_name):

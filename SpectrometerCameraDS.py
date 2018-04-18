@@ -10,6 +10,7 @@ import PyTango as pt
 from PyTango.server import Device, DeviceMeta
 from PyTango.server import attribute
 from PyTango.server import device_property
+from SpectrometerCameraDeviceController import SpectrometerCameraDeviceController
 from CameraDeviceController_2 import CameraDeviceController
 import numpy as np
 
@@ -48,8 +49,8 @@ class SpectrometerCameraDS(Device):
                                  access=pt.AttrWriteType.READ,
                                  max_dim_x=16384,
                                  display_level=pt.DispLevel.OPERATOR,
-                                 unit="nm",
-                                 format="%5.2f",
+                                 unit="m",
+                                 format="%5.2e",
                                  fget="get_wavelengthvector",
                                  doc="Wavelength vector",
                                  )
@@ -64,6 +65,37 @@ class SpectrometerCameraDS(Device):
                          fget="get_spectrum",
                          doc="Spectrum",
                          )
+
+    width = attribute(label='Spectrum width FWHM',
+                      dtype=np.double,
+                      access=pt.AttrWriteType.READ,
+                      display_level=pt.DispLevel.OPERATOR,
+                      unit="m",
+                      format="%5.2e",
+                      fget="get_width",
+                      doc="FWHM for the peak in spectrum. Basic thresholding and peak detection is used.",
+                      )
+
+    peak = attribute(label='Spectrum peak',
+                     dtype=np.double,
+                     access=pt.AttrWriteType.READ,
+                     display_level=pt.DispLevel.OPERATOR,
+                     unit="m",
+                     format="%5.2e",
+                     fget="get_peak",
+                     doc="Wavelength for the peak in spectrum. Basic thresholding and peak detection is used.",
+                     )
+
+
+    sat_lvl = attribute(label='Saturation level',
+                        dtype=np.double,
+                        access=pt.AttrWriteType.READ,
+                        display_level=pt.DispLevel.OPERATOR,
+                        unit="relative",
+                        format="%2.2e",
+                        fget="get_satlvl",
+                        doc="Relative amount of pixels that are saturated. This should be zero.",
+                        )
 
     camera_name = device_property(dtype=str,
                                   doc="Tango name of the camera device",
@@ -83,11 +115,16 @@ class SpectrometerCameraDS(Device):
                                          default_value="2.0")
 
     roi = device_property(dtype=[int],
-                          doc="Wavelength of the central pixel of the ROI in nm",
+                          doc="Pixel coordinates for the ROI: [left, top, width, height]",
                           default_value=[0, 0, 100, 100])
+
+    saturation_level = device_property(dtype=int,
+                          doc="Saturation pixel value, used for estimating overexposure",
+                          default_value=65536)
 
     def __init__(self, klass, name):
         self.wavelengthvector_data = np.array([])
+        self.max_value = 1.0
         self.dev_controller = None
         self.db = None
         Device.__init__(self, klass, name)
@@ -110,8 +147,11 @@ class SpectrometerCameraDS(Device):
         except Exception as e:
             self.error_info("Error stopping camera controller: {0}".format(e))
         try:
-            self.dev_controller = CameraDeviceController(self.camera_name, params)
-            self.setup_camera()
+            self.setup_spectrometer()
+            self.dev_controller = SpectrometerCameraDeviceController(self.camera_name, params,
+                                                                     self.wavelengthvector_data,
+                                                                     self.max_value)
+            # self.dev_controller = CameraDeviceController(self.camera_name, params)
         except Exception as e:
             self.error_stream("Error creating camera controller: {0}".format(e))
             return
@@ -120,18 +160,11 @@ class SpectrometerCameraDS(Device):
         # self.set_state(pt.DevState.ON)
         self.dev_controller.add_state_callback(self.change_state)
 
-    def setup_camera(self):
+    def setup_spectrometer(self):
         self.info_stream("Entering setup_camera")
         self.wavelengthvector_data = (self.central_wavelength + np.arange(-self.roi[2] / 2,
                                                                           self.roi[2] / 2) * self.dispersion) * 1e-9
-
-        # cmd0 = self.dev_controller.exec_command("stop")
-        # cmd_d = self.dev_controller.delay_command(1.0, after_cmd=cmd0)
-        # cmd1 = self.dev_controller.write_attribute("imageoffsetx", self.roi[0], after_cmd=cmd_d)
-        # cmd2 = self.dev_controller.write_attribute("imageoffsety", self.roi[1], after_cmd=cmd_d)
-        # cmd3 = self.dev_controller.write_attribute("imagewidth", self.roi[2], after_cmd=cmd_d)
-        # cmd4 = self.dev_controller.write_attribute("imageheight", self.roi[3], after_cmd=cmd_d)
-        # self.dev_controller.exec_command("start", after_cmd=[cmd1, cmd2, cmd3, cmd4])
+        self.max_value = self.saturation_level
 
     def change_state(self, new_state, new_status=None):
         self.debug_stream("Change state from {0} to {1}".format(self.get_state(), new_state))
@@ -185,6 +218,18 @@ class SpectrometerCameraDS(Device):
     def set_gain(self, new_gain):
         self.debug_stream("In set_gain: New value {0}".format(new_gain))
         self.dev_controller.write_attribute("gain", new_gain)
+
+    def get_width(self):
+        attr = self.dev_controller.get_attribute("width")
+        return attr
+
+    def get_peak(self):
+        attr = self.dev_controller.get_attribute("peak")
+        return attr
+
+    def get_satlvl(self):
+        attr = self.dev_controller.get_attribute("satlvl")
+        return attr
 
 
 if __name__ == "__main__":

@@ -104,7 +104,7 @@ class Condition(object):
 
 
 class DeviceCommand(object):
-    def __init__(self, name, operation, device, data=None, recurrent=False, period=1.0, timeout=2.0):
+    def __init__(self, name, operation, device, data=None, recurrent=False, period=1.0, timeout=3.0):
         self.name = name
         self.operation = operation
         self.device = device
@@ -119,6 +119,7 @@ class DeviceCommand(object):
         self.subscriber_list = list()
         self.subscriber_lock = threading.Lock()
         self.condition_dict = dict()
+        self.condition_lock = threading.Lock()
         self.post_action_list = list()
 
         self.recurrent = recurrent
@@ -150,8 +151,10 @@ class DeviceCommand(object):
                     remove_list.append(subscriber)
                 except Exception as e:
                     root.error("Error notifying subscriber {0} returned {1}".format(subscriber, str(e)))
-        for rem_sub in remove_list:
-            self.remove_subscriber(rem_sub)
+            for rem_sub in remove_list:
+                self.subscriber_list.remove(rem_sub)
+        # for rem_sub in remove_list:
+        #     self.remove_subscribers(rem_sub)
 
     def start(self):
         root.debug("Starting command \"{0}\"".format(self.name))
@@ -191,48 +194,51 @@ class DeviceCommand(object):
     def check_condition(self, cond_obj=None):
         root.debug("Check conditions for \"{0}\"".format(self.name))
         remove_list = []
-        if cond_obj is None:
-            for cond in self.condition_dict:
+        with self.condition_lock:
+            if cond_obj is None:
+                for cond in self.condition_dict:
+                    try:
+                        if cond.done is True:
+                            result = self.condition_dict[cond].check_condition()
+                            root.debug("DeviceCommand \"{0}\" checking condition \"{1}\": {2}".format(self.name,
+                                                                                                      cond.name,
+                                                                                                      result))
+                            # if result is True:
+                            #     remove_list.append(cond)
+                    except NameError:
+                        remove_list.append(cond)
+            else:
                 try:
-                    if cond.done is True:
-                        result = self.condition_dict[cond].check_condition()
+                    root.debug("Condition status: {0}".format(cond_obj.done))
+                    if cond_obj.done is True and cond_obj in self.condition_dict:
+                        result = self.condition_dict[cond_obj].check_condition()
                         root.debug("DeviceCommand \"{0}\" checking condition \"{1}\": {2}".format(self.name,
-                                                                                                  cond.name,
+                                                                                                  cond_obj.name,
                                                                                                   result))
                         # if result is True:
-                        #     remove_list.append(cond)
+                        #     remove_list.append(cond_obj)
                 except NameError:
-                    remove_list.append(cond)
-        else:
-            try:
-                root.debug("Condition status: {0}".format(cond_obj.done))
-                if cond_obj.done is True and cond_obj in self.condition_dict:
-                    result = self.condition_dict[cond_obj].check_condition()
-                    root.debug("DeviceCommand \"{0}\" checking condition \"{1}\": {2}".format(self.name,
-                                                                                              cond_obj.name,
-                                                                                              result))
-                    # if result is True:
-                    #     remove_list.append(cond_obj)
-            except NameError:
-                remove_list.append(cond_obj)
-        for remove_cond in remove_list:
-            self.condition_dict.pop(remove_cond)
-        fulfilled = True
-        for cond in self.condition_dict:
-            if self.condition_dict[cond].get_status() is False:
-                fulfilled = False
-                break
+                    remove_list.append(cond_obj)
+            for remove_cond in remove_list:
+                self.condition_dict.pop(remove_cond)
+            fulfilled = True
+            for cond in self.condition_dict:
+                if self.condition_dict[cond].get_status() is False:
+                    fulfilled = False
+                    break
         if fulfilled is True:
             self.execute_operation()
 
     def add_condition(self, cond_obj, valid_range=None, invalid_range=None):
-        if cond_obj not in self.condition_dict:
-            new_cond = Condition(cond_obj, valid_range, invalid_range)
-            self.condition_dict[cond_obj] = new_cond
-            cond_obj.add_subscriber(self.check_condition)
+        with self.condition_lock:
+            if cond_obj not in self.condition_dict:
+                new_cond = Condition(cond_obj, valid_range, invalid_range)
+                self.condition_dict[cond_obj] = new_cond
+                cond_obj.add_subscriber(self.check_condition)
 
     def clear_conditions(self):
-        self.condition_dict = dict()
+        with self.condition_lock:
+            self.condition_dict = dict()
 
     def get_attribute(self):
         return self.attr_result
@@ -249,6 +255,8 @@ class DeviceCommand(object):
                 self._exec_command()
             elif self.operation == "delay":
                 self._delay_operation()
+            elif self.operation == "read_attributes":
+                self._read_attributes()
 
     def exec_post_actions(self):
         root.debug("Executing post actions for {0}".format(self.name))
@@ -269,6 +277,17 @@ class DeviceCommand(object):
                 attr_future = self.device.read_attribute(self.name, wait=False)
             except pt.DevFailed as e:
                 root.error("read_attribute returned error {0}".format(str(e)))
+                self.status_msg = e[0].desc
+                return False
+            attr_future.add_done_callback(self._attribute_cb)
+
+    def _read_attributes(self):
+        root.info("Sending read attributes \"{0}\" to device".format(self.data))
+        if self.device is not None:
+            try:
+                attr_future = self.device.read_attributes(self.data, wait=False)
+            except pt.DevFailed as e:
+                root.error("read_attributes returned error {0}".format(str(e)))
                 self.status_msg = e[0].desc
                 return False
             attr_future.add_done_callback(self._attribute_cb)
@@ -371,6 +390,11 @@ class DeviceCommand(object):
 
 
 class AttributeWrapper(object):
+    """
+    Wrap a Tango attribute result in with subscribers that are called when new data arrives
+    via set_attribute. A subscriber is a callable that is called with the instance of the
+    AttributeWrapper as argument.
+    """
     def __init__(self, name, attr=None):
         self.name = name
         if attr is None:
