@@ -64,7 +64,7 @@ class TangoAttributeProtocol(Protocol):
         self._check_timeout_deferred = None
 
         self.logger = logging.getLogger("SpectrometerCameraController.Protocol_{0}_{1}".format(operation.upper(), name))
-        self.logger.setLevel(logging.DEBUG)
+        self.logger.setLevel(logging.WARNING)
 
     def makeConnection(self, transport=None):
         self.logger.debug("Protocol {0} make connection".format(self.name))
@@ -227,7 +227,7 @@ class TangoAttributeFactory(Factory):
         self.attribute_dict = dict()
 
         self.logger = logging.getLogger("SpectrometerCameraController.Factory_{0}".format(device_name))
-        self.logger.setLevel(logging.DEBUG)
+        self.logger.setLevel(logging.WARNING)
 
     def startFactory(self):
         self.logger.info("Starting TangoAttributeFactory")
@@ -331,7 +331,7 @@ class LoopingCall(object):
         self.loop_deferred = defer.Deferred()
 
         self.logger = logging.getLogger("SpectrometerCameraController.LoopingCall")
-        self.logger.setLevel(logging.DEBUG)
+        self.logger.setLevel(logging.WARNING)
 
     def start(self, interval, now=True):
         """

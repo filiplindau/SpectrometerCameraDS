@@ -14,7 +14,7 @@ import threading
 import time
 import logging
 import PyTango as tango
-import traceback
+import numpy as np
 from twisted.internet import reactor, defer, error
 import TangoTwisted
 import SpectrometerCameraController_twisted as SpectrometerCameraController
@@ -114,7 +114,7 @@ class State(object):
         self.controller = controller    # type: SpectrometerCameraController.SpectrometerCameraController
         self.logger = logging.getLogger("SpectrometerCameraController.{0}".format(self.name.upper()))
         # self.logger.name =
-        self.logger.setLevel(logging.DEBUG)
+        self.logger.setLevel(logging.WARNING)
         self.deferred_list = list()
         self.next_state = None
         self.cond_obj = threading.Condition()
@@ -228,12 +228,15 @@ class StateDeviceConnect(State):
 
 class StateSetupAttributes(State):
     """
-    Setup attributes in the tango devices. Parameters stored in controller.setup_attr_params
-    Each key in setup_attr_params is an attribute with the value as the value
+    Setup attributes in the tango devices. Parameters stored in controller.setup_params
+    Each key in setup_params is an attribute with the value as the value
 
-    Device name is the name of the key in the controller.device_name dict (e.g. "motor", "spectrometer").
+    Device name is the name of the key in the controller.device_name dict (e.g. "camera").
 
-    setup_params["triggermode"]: motor speed
+    First the camera is put in ON state to be able to set certain attributes.
+    When it is detected that the camera is in ON state the callback setup_attr is run,
+    sending check_attributes on the attributes in the setup_params dict.
+
     """
     name = "setup_attributes"
 
@@ -303,6 +306,7 @@ class StateSetupAttributes(State):
 
     def attr_check_cb(self, result):
         self.logger.info("Check attribute result: {0}".format(result))
+        self.controller.camera_result[result.name.lower()] = result
         return result
 
     def attr_check_eb(self, err):
@@ -323,14 +327,27 @@ class StateRunning(State):
 
     def state_enter(self, prev_state=None):
         State.state_enter(self, prev_state)
+        # Start camera:
+        self.controller.set_status("Starting spectrometer camera")
         d = self.controller.send_command("start", "camera", None)
-        # Start looping calls for monitored attributes
-
         d.addCallbacks(self.check_requirements, self.state_error)
         self.deferred_list.append(d)
+        # Start looping calls for monitored attributes
+        dev_name = "camera"
+        self.stop_looping_calls()
+        for key in self.controller.running_attr_params:
+            self.logger.debug("Starting looping call for {0}".format(key))
+            interval = self.controller.running_attr_params[key]
+            lc = TangoTwisted.LoopingCall(self.controller.read_attribute, key, dev_name)
+            self.controller.looping_calls.append(lc)
+            d = lc.start(interval)
+            d.addCallbacks(self.update_attribute, self.state_error)
+            lc.loop_deferred.addCallback(self.update_attribute)
+            lc.loop_deferred.addErrback(self.state_error)
 
     def check_requirements(self, result):
         self.logger.info("Check requirements result: {0}".format(result))
+        self.controller.set_status("Spectrometer running")
         return True
 
     def state_error(self, err):
@@ -338,18 +355,101 @@ class StateRunning(State):
         if err.type == defer.CancelledError:
             self.logger.info("Cancelled error, ignore")
         else:
-            self.controller.set_status("Error: {0}".format(err))
-            # If the error was DB_DeviceNotDefined, go to UNKNOWN state and reconnect later
-            self.next_state = "unknown"
-            self.stop_run()
+            if self.running is True:
+                self.controller.set_status("Error: {0}".format(err))
+                self.stop_looping_calls()
+                # If the error was DB_DeviceNotDefined, go to UNKNOWN state and reconnect later
+                self.next_state = "unknown"
+                self.stop_run()
 
     def check_message(self, msg):
         if msg == "stop":
             self.logger.debug("Message stop... set next state.")
-            d = self.deferred_list[0]   # type: defer.Deferred
-            d.cancel()
+            for d in self.deferred_list:
+                d.cancel()
+            self.stop_looping_calls()
             self.next_state = "on"
             self.stop_run()
+
+    def stop_looping_calls(self):
+        for lc in self.controller.looping_calls:
+            # Stop looping calls (ignore callback):
+            try:
+                lc.stop()
+            except Exception as e:
+                self.logger.error("Could not stop looping call: {0}".format(e))
+        self.controller.looping_calls = list()
+
+    def update_attribute(self, result):
+        self.logger.info("Updating result")
+        try:
+            self.logger.debug("Result for {0}: {1}".format(result.name, result.value))
+        except AttributeError:
+            return
+        with self.controller.state_lock:
+            self.controller.camera_result[result.name.lower()] = result
+        if result.name.lower() == "image":
+            self.calculate_spectrum(result)
+
+    def calculate_spectrum(self, result):
+        attr_image = result
+        self.logger.debug("Calculating spectrum. Type image: {0}".format(type(attr_image)))
+        with self.controller.state_lock:
+            wavelengths = self.controller.camera_result["wavelengths"].value
+            max_value = self.controller.camera_result["max_value"].value
+        if attr_image is not None:
+            quality = attr_image.quality
+            a_time = attr_image.time
+            spectrum = attr_image.value.sum(0)
+
+            try:
+                s_bkg = spectrum[0:10].mean()
+                spec_bkg = spectrum - s_bkg
+                l_peak = (spec_bkg * wavelengths).sum() / spec_bkg.sum()
+                try:
+                    dl_rms = np.sqrt((spec_bkg * (wavelengths - l_peak) ** 2).sum() / spec_bkg.sum())
+                    dl_fwhm = dl_rms * 2 * np.sqrt(2 * np.log(2))
+                except RuntimeWarning:
+                    dl_rms = None
+                    dl_fwhm = None
+                nbr_sat = np.double((attr_image.value >= max_value).sum())
+                sat_lvl = nbr_sat / np.size(attr_image.value)
+            except AttributeError:
+                l_peak = 0.0
+                dl_fwhm = 0.0
+                sat_lvl = 0.0
+                quality = tango.AttrQuality.ATTR_INVALID
+            except ValueError:
+                # Dimension mismatch
+                l_peak = 0.0
+                dl_fwhm = 0.0
+                sat_lvl = 0.0
+                quality = tango.AttrQuality.ATTR_INVALID
+            self.logger.debug("Spectrum parameters calculated")
+            attr = tango.DeviceAttribute()
+            attr.name = "spectrum"
+            attr.value = spectrum
+            attr.time = a_time
+            attr.quality = quality
+            self.controller.camera_result["spectrum"] = attr
+            attr = tango.DeviceAttribute()
+            attr.name = "width"
+            attr.value = dl_fwhm
+            attr.time = a_time
+            attr.quality = quality
+            self.controller.camera_result["width"] = attr
+            attr = tango.DeviceAttribute()
+            attr.name = "peak"
+            attr.value = l_peak
+            attr.time = a_time
+            attr.quality = quality
+            self.controller.camera_result["peak"] = attr
+            attr = tango.DeviceAttribute()
+            attr.name = "satlvl"
+            attr.value = sat_lvl
+            attr.time = a_time
+            attr.quality = quality
+            self.controller.camera_result["satlvl"] = attr
 
 
 class StateOn(State):
@@ -366,15 +466,26 @@ class StateOn(State):
     def state_enter(self, prev_state=None):
         State.state_enter(self, prev_state)
         # d = defer.Deferred()
+        self.controller.set_status("Stopping spectrometer camera")
         d = self.controller.send_command("stop", "camera", None)
-
-        # Start looping calls for monitored attributes
-
         d.addCallbacks(self.check_requirements, self.state_error)
         self.deferred_list.append(d)
 
+        dev_name = "camera"
+        self.stop_looping_calls()
+        for key in self.controller.standby_attr_params:
+            self.logger.debug("Starting looping call for {0}".format(key))
+            interval = self.controller.standby_attr_params[key]
+            lc = TangoTwisted.LoopingCall(self.controller.read_attribute, key, dev_name)
+            self.controller.looping_calls.append(lc)
+            d = lc.start(interval)
+            d.addCallbacks(self.update_attribute, self.state_error)
+            lc.loop_deferred.addCallback(self.update_attribute)
+            lc.loop_deferred.addErrback(self.state_error)
+
     def check_requirements(self, result):
         self.logger.info("Check requirements result: {0}".format(result))
+        self.controller.set_status("Spectrometer standby")
         return True
 
     def state_error(self, err):
@@ -383,17 +494,38 @@ class StateOn(State):
             self.logger.info("Cancelled error, ignore")
         else:
             self.controller.set_status("Error: {0}".format(err))
+            self.stop_looping_calls()
             # If the error was DB_DeviceNotDefined, go to UNKNOWN state and reconnect later
             self.next_state = "unknown"
             self.stop_run()
 
+    def stop_looping_calls(self):
+        for lc in self.controller.looping_calls:
+            # Stop looping calls (ignore callback):
+            try:
+                lc.stop()
+            except Exception as e:
+                self.logger.error("Could not stop looping call: {0}".format(e))
+        self.controller.looping_calls = list()
+
     def check_message(self, msg):
         if msg == "start":
             self.logger.debug("Message start... set next state.")
-            d = self.deferred_list[0]   # type: defer.Deferred
-            d.cancel()
-            self.next_state = "on"
+            for d in self.deferred_list:
+                d.cancel()
+            self.stop_looping_calls()
+
+            self.next_state = "running"
             self.stop_run()
+
+    def update_attribute(self, result):
+        self.logger.info("Updating result")
+        try:
+            self.logger.debug("Result for {0}: {1}".format(result.name, result.value))
+        except AttributeError:
+            return
+        with self.controller.state_lock:
+            self.controller.camera_result[result.name.lower()] = result
 
 
 class StateFault(State):

@@ -47,23 +47,44 @@ class SpectrometerCameraController(object):
         self.device_factory_dict = dict()
 
         self.logger = logging.getLogger("SpectrometerCameraController.Controller")
-        self.logger.setLevel(logging.DEBUG)
+        self.logger.setLevel(logging.WARNING)
         self.logger.info("SpectrometerCameraController.__init__")
 
-        self.attr_params = dict()
-        self.attr_params["state"] = 0.2
-        self.attr_params["gain"] = 2.0
-        self.attr_params["exposuretime"] = 2.0
-        self.attr_params["image"] = 0.1
+        self.running_attr_params = dict()
+        self.running_attr_params["state"] = 0.2
+        self.running_attr_params["gain"] = 2.0
+        self.running_attr_params["exposuretime"] = 2.0
+        self.running_attr_params["image"] = 0.1
+
+        self.standby_attr_params = dict()
+        self.standby_attr_params["state"] = 0.2
+        self.standby_attr_params["gain"] = 2.0
+        self.standby_attr_params["exposuretime"] = 2.0
+
+        # Dictionary where read and constructed tango attributes are stored.
+        # Assume None or tango.DeviceAttribute
+        self.camera_result = dict()
+        self.camera_result["state"] = None
+        self.camera_result["gain"] = None
+        self.camera_result["exposuretime"] = None
+        self.camera_result["image"] = None
+        self.camera_result["wavelegnths"] = None
+        self.camera_result["width"] = None
+        self.camera_result["peak"] = None
+        self.camera_result["satlvl"] = None
+        self.camera_result["max_value"] = None
+        self.camera_result["spectrum"] = None
+
+        self.looping_calls = list()
 
         self.setup_params = dict()
         self.setup_params["triggermode"] = "Off"
-        # self.setup_params["pixelformat"] = "Mono16"
+        self.setup_params["pixelformat"] = "Mono16"
         self.setup_params["imageoffsetx"] = 0
-        # self.setup_params["imageoffsety"] = 0
-        # self.setup_params["imagewidth"] = 1280
-        # self.setup_params["imageheight"] = 1024
-        # self.setup_params["framerate"] = 10
+        self.setup_params["imageoffsety"] = 0
+        self.setup_params["imagewidth"] = 1280
+        self.setup_params["imageheight"] = 1024
+        self.setup_params["framerate"] = 10
 
         self.state_lock = threading.Lock()
         self.status = ""
@@ -143,6 +164,7 @@ class SpectrometerCameraController(object):
             factory = self.device_factory_dict[self.device_names[dev_name]]
             d = factory.buildProtocol("check", attr_name, None, write=write, target_value=target_value,
                                       tolerance=tolerance, period=period, timeout=timeout)
+            d.addCallback(self.update_attribute)
         else:
             self.logger.error("Device name {0} not found among {1}".format(dev_name, self.device_factory_dict))
             err = tango.DevError(reason="Device {0} not used".format(dev_name),
@@ -175,6 +197,14 @@ class SpectrometerCameraController(object):
             for m in self.state_notifier_list:
                 m(self.state, self.status)
 
+    def get_attribute(self, attr_name):
+        with self.state_lock:
+            try:
+                res = self.camera_result[attr_name]
+            except KeyError:
+                res = None
+            return res
+
     def add_state_notifier(self, state_notifier_method):
         self.state_notifier_list.append(state_notifier_method)
 
@@ -183,3 +213,12 @@ class SpectrometerCameraController(object):
             self.state_notifier_list.remove(state_notifier_method)
         except ValueError:
             self.logger.warning("Method {0} not in list. Ignoring.".format(state_notifier_method))
+
+    def update_attribute(self, result):
+        self.logger.info("Updating attribute with {0}".format(result))
+        try:
+            attr_name = result.name
+        except AttributeError:
+            return result
+        self.camera_result[attr_name] = result
+        return result
