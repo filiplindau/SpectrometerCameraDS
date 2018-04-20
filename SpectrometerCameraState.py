@@ -324,6 +324,7 @@ class StateRunning(State):
     def __init__(self, controller):
         State.__init__(self, controller)
         self.t0 = time.time()
+        self.logger.setLevel(logging.DEBUG)
 
     def state_enter(self, prev_state=None):
         State.state_enter(self, prev_state)
@@ -342,8 +343,8 @@ class StateRunning(State):
             self.controller.looping_calls.append(lc)
             d = lc.start(interval)
             d.addCallbacks(self.update_attribute, self.state_error)
-            lc.loop_deferred.addCallback(self.update_attribute)
-            lc.loop_deferred.addErrback(self.state_error)
+            # lc.loop_deferred.addCallback(self.update_attribute)
+            # lc.loop_deferred.addErrback(self.state_error)
 
     def check_requirements(self, result):
         self.logger.info("Check requirements result: {0}".format(result))
