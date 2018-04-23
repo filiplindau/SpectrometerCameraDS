@@ -223,7 +223,6 @@ class TangoAttributeFactory(Factory):
         self.device = None
         self.connected = False
         self.d = None
-        self.proto_list = list()
         self.attribute_dict = dict()
 
         self.logger = logging.getLogger("SpectrometerCameraController.Factory_{0}".format(device_name))
@@ -250,7 +249,6 @@ class TangoAttributeFactory(Factory):
             self.logger.debug("args: {0}, {1}, {2}, kw: {3}".format(operation, name, data, kw))
             proto = self.protocol(operation, name, data, **kw)
             proto.factory = self
-            self.proto_list.append(proto)
             df = proto.makeConnection()
             df.addCallbacks(self.data_received, self.protocol_fail)
             if d is not None:

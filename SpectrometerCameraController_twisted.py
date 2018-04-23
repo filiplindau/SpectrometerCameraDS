@@ -111,7 +111,6 @@ class SpectrometerCameraController(object):
         self.camera_result["spectrum"] = None
 
         self.looping_calls = list()
-        self.monitored_attributes = dict()
 
         self.setup_params = dict()
         self.setup_params["triggermode"] = "Off"
@@ -209,44 +208,6 @@ class SpectrometerCameraController(object):
                                  origin="check_attribute")
             d = Failure(tango.DevFailed(err))
         return d
-
-    def monitor_attribute(self, attr_name, dev_name, period=0.3):
-        self.logger.info("Monitoring attribute \"{0}\" on \"{1}\" with period {2} s".format(attr_name,
-                                                                                            dev_name,
-                                                                                            period))
-        if dev_name in self.device_names:
-            mon_attr = MonitorAttribute(attr_name, dev_name, period)
-            self.monitored_attributes[attr_name] = mon_attr
-            factory = self.device_factory_dict[self.device_names[dev_name]]
-            d = factory.buildProtocol("read", attr_name)
-            d.addCallback(self.monitor_update)
-        else:
-            self.logger.error("Device name {0} not found among {1}".format(dev_name, self.device_factory_dict))
-            err = tango.DevError(reason="Device {0} not used".format(dev_name),
-                                 severety=tango.ErrSeverity.ERR,
-                                 desc="The device is not in the list of devices used by this controller",
-                                 origin="monitor_attribute")
-            d = Failure(tango.DevFailed(err))
-        return d
-
-    def update_monitor(self, result):
-        self.logger.info("Updating monitored attribute with {0}".format(result))
-        try:
-            attr_name = result.name
-        except AttributeError:
-            return result
-        self.camera_result[attr_name] = result
-        try:
-            mon_attr = self.monitored_attributes[attr_name]
-        except KeyError:
-            self.logger.warning("Monitored attribute not found.")
-            return result
-        if mon_attr.running is True:
-            dev_name = mon_attr.dev_name
-            factory = self.device_factory_dict[self.device_names[dev_name]]
-            d = defer_later(mon_attr.get_next_delay(), factory.buildProtocol, "read", attr_name)
-            d.addCallback(self.monitor_update)
-        return result
 
     def get_state(self):
         with self.state_lock:
